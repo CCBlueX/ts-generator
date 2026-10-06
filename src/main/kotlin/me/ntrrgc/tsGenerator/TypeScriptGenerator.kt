@@ -31,6 +31,7 @@ package me.ntrrgc.tsGenerator
 
 import me.commandblock2.tsGenerator.binaryName
 import me.commandblock2.tsGenerator.commentIfInvalid
+import me.commandblock2.tsGenerator.safeTypeParameters
 import me.commandblock2.tsGenerator.toKFunction
 import java.beans.Introspector
 import java.lang.reflect.Method
@@ -120,7 +121,8 @@ class TypeScriptGenerator(
             val depth = path.count { it == '/' }
 
             dependentTypes.joinToString("\n", postfix = "\n") {
-                val importPath = modules[modules.keys.find { key -> isSameClass(key, it) }]!!.path
+                val importPath = modules[modules.keys.find { key -> isSameClass(key, it) }]?.path
+                    ?: return@joinToString "type ${it.binaryName()} = any"
 
                 val upLevels = "../".repeat(depth)
                 val downPath = importPath.removePrefix("/")
@@ -219,9 +221,9 @@ class TypeScriptGenerator(
             // but you can see there is definitely no way of acquiring the actual type with proper API
             // would you rather rely on .toString() and parse it and rely on the alternative shitty hack?
             // place the breakpoint and see for yourself
-            if (kType.arguments.size != kClass.typeParameters.size) {
-                return binaryName + if (kClass.typeParameters.isNotEmpty()) "<${
-                    (1..kClass.typeParameters.size).joinToString(
+            if (kType.arguments.size != kClass.safeTypeParameters().size) {
+                return binaryName + if (kClass.safeTypeParameters().isNotEmpty()) "<${
+                    (1..kClass.safeTypeParameters().size).joinToString(
                         ", "
                     ) { "Object" }
                 }>" else ""
@@ -344,7 +346,7 @@ class TypeScriptGenerator(
             } else ""
 
 
-            val templateParameters = formatTypeParameters(klass.typeParameters)
+            val templateParameters = formatTypeParameters(klass.safeTypeParameters())
 
 
 
@@ -353,11 +355,11 @@ class TypeScriptGenerator(
                         staticFieldsOf(klass) + staticMethodsOf(
                             klass,
                             interfaceSupertypes,
-                            klass.typeParameters
+                            klass.safeTypeParameters()
                         )) +
                     constructorsOf(klass) +
                     propertiesOf(klass) +
-                    functionsOf(klass, interfaceSupertypes, klass.typeParameters) +
+                    functionsOf(klass, interfaceSupertypes, klass.safeTypeParameters()) +
                     "}"
         }
 
@@ -390,11 +392,11 @@ class TypeScriptGenerator(
 
         private fun createKotlinType(javaClass: Class<*>): KType {
             val kClass = javaClass.kotlin
-            return if (kClass.typeParameters.isEmpty()) {
+            return if (kClass.safeTypeParameters().isEmpty()) {
                 kClass.createType()
             } else {
                 // If the class has type parameters, create type with Any? for each parameter
-                val typeArgs = kClass.typeParameters.map {
+                val typeArgs = kClass.safeTypeParameters().map {
                     KTypeProjection.invariant(Any::class.createType(nullable = true))
                 }
                 kClass.createType(typeArgs)
@@ -936,7 +938,14 @@ class TypeScriptGenerator(
             } != null)
             return
 
-        val module = TypeScriptModule(klass)
+        // kotlin-reflect memoizes linkage errors (optional dependencies missing from the classpath)
+        // and rethrows them from wherever the class is touched next
+        val module = try {
+            TypeScriptModule(klass)
+        } catch (throwable: Throwable) {
+            println("Skipping ${klass.qualifiedName}: $throwable")
+            return
+        }
         modules[klass] = module
         module.dependentTypes.forEach { visitClass(it) }
     }
